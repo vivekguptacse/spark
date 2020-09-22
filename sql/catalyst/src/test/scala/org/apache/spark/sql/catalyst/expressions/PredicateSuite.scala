@@ -522,37 +522,9 @@ class PredicateSuite extends SparkFunSuite with ExpressionEvalHelper {
     assert(expression == expected)
   }
 
-  val row0 = create_row(null)
-  val row1 = create_row(false)
-  val row2 = create_row(true)
-
-  test("istrue and isnottrue") {
-    checkEvaluation(IsTrue(Literal.create(null, BooleanType)), false, row0)
-    checkEvaluation(IsNotTrue(Literal.create(null, BooleanType)), true, row0)
-    checkEvaluation(IsTrue(Literal.create(false, BooleanType)), false, row1)
-    checkEvaluation(IsNotTrue(Literal.create(false, BooleanType)), true, row1)
-    checkEvaluation(IsTrue(Literal.create(true, BooleanType)), true, row2)
-    checkEvaluation(IsNotTrue(Literal.create(true, BooleanType)), false, row2)
-    IsTrue(Literal.create(null, IntegerType)).checkInputDataTypes() match {
-      case TypeCheckResult.TypeCheckFailure(msg) =>
-        assert(msg.contains("argument 1 requires boolean type"))
-    }
-  }
-
-  test("isfalse and isnotfalse") {
-    checkEvaluation(IsFalse(Literal.create(null, BooleanType)), false, row0)
-    checkEvaluation(IsNotFalse(Literal.create(null, BooleanType)), true, row0)
-    checkEvaluation(IsFalse(Literal.create(false, BooleanType)), true, row1)
-    checkEvaluation(IsNotFalse(Literal.create(false, BooleanType)), false, row1)
-    checkEvaluation(IsFalse(Literal.create(true, BooleanType)), false, row2)
-    checkEvaluation(IsNotFalse(Literal.create(true, BooleanType)), true, row2)
-    IsFalse(Literal.create(null, IntegerType)).checkInputDataTypes() match {
-      case TypeCheckResult.TypeCheckFailure(msg) =>
-        assert(msg.contains("argument 1 requires boolean type"))
-    }
-  }
-
   test("isunknown and isnotunknown") {
+    val row0 = create_row(null)
+
     checkEvaluation(IsUnknown(Literal.create(null, BooleanType)), true, row0)
     checkEvaluation(IsNotUnknown(Literal.create(null, BooleanType)), false, row0)
     IsUnknown(Literal.create(null, IntegerType)).checkInputDataTypes() match {
@@ -565,5 +537,21 @@ class PredicateSuite extends SparkFunSuite with ExpressionEvalHelper {
     val row = create_row(1)
     val inSet = InSet(BoundReference(0, IntegerType, true), Set.empty)
     checkEvaluation(inSet, false, row)
+  }
+
+  test("SPARK-32764: compare special double/float values") {
+    checkEvaluation(EqualTo(Literal(Double.NaN), Literal(Double.NaN)), true)
+    checkEvaluation(EqualTo(Literal(Double.NaN), Literal(Double.PositiveInfinity)), false)
+    checkEvaluation(EqualTo(Literal(0.0D), Literal(-0.0D)), true)
+    checkEvaluation(GreaterThan(Literal(Double.NaN), Literal(Double.PositiveInfinity)), true)
+    checkEvaluation(GreaterThan(Literal(Double.NaN), Literal(Double.NaN)), false)
+    checkEvaluation(GreaterThan(Literal(0.0D), Literal(-0.0D)), false)
+
+    checkEvaluation(EqualTo(Literal(Float.NaN), Literal(Float.NaN)), true)
+    checkEvaluation(EqualTo(Literal(Float.NaN), Literal(Float.PositiveInfinity)), false)
+    checkEvaluation(EqualTo(Literal(0.0F), Literal(-0.0F)), true)
+    checkEvaluation(GreaterThan(Literal(Float.NaN), Literal(Float.PositiveInfinity)), true)
+    checkEvaluation(GreaterThan(Literal(Float.NaN), Literal(Float.NaN)), false)
+    checkEvaluation(GreaterThan(Literal(0.0F), Literal(-0.0F)), false)
   }
 }

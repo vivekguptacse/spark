@@ -20,14 +20,12 @@ package org.apache.spark.sql.execution.datasources.v2
 import java.util.UUID
 
 import org.apache.spark.SparkException
-import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.Dataset
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.Attribute
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.connector.catalog.SupportsWrite
-import org.apache.spark.sql.connector.write.{SupportsOverwrite, SupportsTruncate, V1WriteBuilder, WriteBuilder}
-import org.apache.spark.sql.execution.SparkPlan
+import org.apache.spark.sql.connector.write.{LogicalWriteInfoImpl, SupportsOverwrite, SupportsTruncate, V1WriteBuilder, WriteBuilder}
+import org.apache.spark.sql.execution.{AlreadyOptimized, SparkPlan}
 import org.apache.spark.sql.sources.{AlwaysTrue, Filter, InsertableRelation}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
@@ -41,7 +39,7 @@ case class AppendDataExecV1(
     writeOptions: CaseInsensitiveStringMap,
     plan: LogicalPlan) extends V1FallbackWriters {
 
-  override protected def doExecute(): RDD[InternalRow] = {
+  override protected def run(): Seq[InternalRow] = {
     writeWithV1(newWriteBuilder().buildForV1Write())
   }
 }
@@ -67,7 +65,7 @@ case class OverwriteByExpressionExecV1(
     filters.length == 1 && filters(0).isInstanceOf[AlwaysTrue]
   }
 
-  override protected def doExecute(): RDD[InternalRow] = {
+  override protected def run(): Seq[InternalRow] = {
     newWriteBuilder() match {
       case builder: SupportsTruncate if isTruncate(deleteWhere) =>
         writeWithV1(builder.truncate().asV1Builder.buildForV1Write())
@@ -82,7 +80,7 @@ case class OverwriteByExpressionExecV1(
 }
 
 /** Some helper interfaces that use V2 write semantics through the V1 writer interface. */
-sealed trait V1FallbackWriters extends SupportsV1Write {
+sealed trait V1FallbackWriters extends V2CommandExec with SupportsV1Write {
   override def output: Seq[Attribute] = Nil
   override final def children: Seq[SparkPlan] = Nil
 
@@ -98,9 +96,12 @@ sealed trait V1FallbackWriters extends SupportsV1Write {
   }
 
   protected def newWriteBuilder(): V1WriteBuilder = {
-    val writeBuilder = table.newWriteBuilder(writeOptions)
-      .withInputDataSchema(plan.schema)
-      .withQueryId(UUID.randomUUID().toString)
+    val info = LogicalWriteInfoImpl(
+      queryId = UUID.randomUUID().toString,
+      schema = plan.schema,
+      options = writeOptions)
+    val writeBuilder = table.newWriteBuilder(info)
+
     writeBuilder.asV1Builder
   }
 }
@@ -109,11 +110,11 @@ sealed trait V1FallbackWriters extends SupportsV1Write {
  * A trait that allows Tables that use V1 Writer interfaces to append data.
  */
 trait SupportsV1Write extends SparkPlan {
-  // TODO: We should be able to work on SparkPlans at this point.
   def plan: LogicalPlan
 
-  protected def writeWithV1(relation: InsertableRelation): RDD[InternalRow] = {
-    relation.insert(Dataset.ofRows(sqlContext.sparkSession, plan), overwrite = false)
-    sparkContext.emptyRDD
+  protected def writeWithV1(relation: InsertableRelation): Seq[InternalRow] = {
+    // The `plan` is already optimized, we should not analyze and optimize it again.
+    relation.insert(AlreadyOptimized.dataFrame(sqlContext.sparkSession, plan), overwrite = false)
+    Nil
   }
 }

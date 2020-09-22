@@ -162,8 +162,16 @@ object ObjectSerializerPruning extends Rule[LogicalPlan] {
    * Note: we should do `transformUp` explicitly to change data types.
    */
   private def alignNullTypeInIf(expr: Expression) = expr.transformUp {
-    case i @ If(_: IsNull, Literal(null, dt), ser) if !dt.sameType(ser.dataType) =>
+    case i @ If(IsNullCondition(), Literal(null, dt), ser) if !dt.sameType(ser.dataType) =>
       i.copy(trueValue = Literal(null, ser.dataType))
+  }
+
+  object IsNullCondition {
+    def unapply(expr: Expression): Boolean = expr match {
+      case _: IsNull => true
+      case i: Invoke if i.functionName == "isNullAt" => true
+      case _ => false
+    }
   }
 
   /**
@@ -235,8 +243,6 @@ object ObjectSerializerPruning extends Rule[LogicalPlan] {
  */
 object ReassignLambdaVariableID extends Rule[LogicalPlan] {
   override def apply(plan: LogicalPlan): LogicalPlan = {
-    if (!SQLConf.get.getConf(SQLConf.OPTIMIZER_REASSIGN_LAMBDA_VARIABLE_ID)) return plan
-
     // The original LambdaVariable IDs are all positive. To avoid conflicts, the new IDs are all
     // negative and starts from -1.
     var newId = 0L

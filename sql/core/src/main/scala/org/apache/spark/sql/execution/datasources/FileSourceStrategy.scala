@@ -50,7 +50,7 @@ import org.apache.spark.util.collection.BitSet
  *     is under the threshold with the addition of the next file, add it.  If not, open a new bucket
  *     and add it.  Proceed to the next file.
  */
-object FileSourceStrategy extends Strategy with Logging {
+object FileSourceStrategy extends Strategy with PredicateHelper with Logging {
 
   // should prune buckets iff num buckets is greater than 1 and there is only one bucket column
   private def shouldPruneBuckets(bucketSpec: Option[BucketSpec]): Boolean = {
@@ -147,17 +147,22 @@ object FileSourceStrategy extends Strategy with Logging {
       //  - filters that need to be evaluated again after the scan
       val filterSet = ExpressionSet(filters)
 
-      val normalizedFilters = DataSourceStrategy.normalizeExprs(filters, l.output)
+      val normalizedFilters = DataSourceStrategy.normalizeExprs(
+        filters.filter(_.deterministic), l.output)
 
       val partitionColumns =
         l.resolve(
           fsRelation.partitionSchema, fsRelation.sparkSession.sessionState.analyzer.resolver)
       val partitionSet = AttributeSet(partitionColumns)
-      val partitionKeyFilters =
-        ExpressionSet(normalizedFilters
+      val partitionKeyFilters = if (partitionColumns.isEmpty) {
+        ExpressionSet(Nil)
+      } else {
+        val predicates = ExpressionSet(normalizedFilters
           .filter(_.references.subsetOf(partitionSet)))
+        logInfo(s"Pruning directories with: ${predicates.mkString(",")}")
+        predicates
+      }
 
-      logInfo(s"Pruning directories with: ${partitionKeyFilters.mkString(",")}")
 
       // subquery expressions are filtered out because they can't be used to prune buckets or pushed
       // down as data filters, yet they would be executed
@@ -175,10 +180,20 @@ object FileSourceStrategy extends Strategy with Logging {
         l.resolve(fsRelation.dataSchema, fsRelation.sparkSession.sessionState.analyzer.resolver)
 
       // Partition keys are not available in the statistics of the files.
-      val dataFilters =
-        normalizedFiltersWithoutSubqueries.filter(_.references.intersect(partitionSet).isEmpty)
-      logInfo(s"Pushed Filters: " +
-        s"${dataFilters.flatMap(DataSourceStrategy.translateFilter).mkString(",")}")
+      // `dataColumns` might have partition columns, we need to filter them out.
+      val dataColumnsWithoutPartitionCols = dataColumns.filterNot(partitionColumns.contains)
+      val dataFilters = normalizedFiltersWithoutSubqueries.flatMap { f =>
+        if (f.references.intersect(partitionSet).nonEmpty) {
+          extractPredicatesWithinOutputSet(f, AttributeSet(dataColumnsWithoutPartitionCols))
+        } else {
+          Some(f)
+        }
+      }
+      val supportNestedPredicatePushdown =
+        DataSourceUtils.supportNestedPredicatePushdown(fsRelation)
+      val pushedFilters = dataFilters
+        .flatMap(DataSourceStrategy.translateFilter(_, supportNestedPredicatePushdown))
+      logInfo(s"Pushed Filters: ${pushedFilters.mkString(",")}")
 
       // Predicates with both partition keys and attributes need to be evaluated after the scan.
       val afterScanFilters = filterSet -- partitionKeyFilters.filter(_.references.nonEmpty)
@@ -204,6 +219,7 @@ object FileSourceStrategy extends Strategy with Logging {
           outputSchema,
           partitionKeyFilters.toSeq,
           bucketSet,
+          None,
           dataFilters,
           table.map(_.identifier))
 

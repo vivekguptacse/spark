@@ -25,18 +25,19 @@ import warnings
 from pyspark import SparkContext, SparkConf
 from pyspark.sql import Row, SparkSession
 from pyspark.sql.functions import udf
-from pyspark.sql.types import *
+from pyspark.sql.types import StructType, StringType, IntegerType, LongType, \
+    FloatType, DoubleType, DecimalType, DateType, TimestampType, BinaryType, StructField, MapType, \
+    ArrayType
 from pyspark.testing.sqlutils import ReusedSQLTestCase, have_pandas, have_pyarrow, \
     pandas_requirement_message, pyarrow_requirement_message
 from pyspark.testing.utils import QuietTest
-from pyspark.util import _exception_message
 
 if have_pandas:
     import pandas as pd
     from pandas.util.testing import assert_frame_equal
 
 if have_pyarrow:
-    import pyarrow as pa
+    import pyarrow as pa  # noqa: F401
 
 
 @unittest.skipIf(
@@ -127,7 +128,7 @@ class ArrowTests(ReusedSQLTestCase):
                             warn.message for warn in warns if isinstance(warn.message, UserWarning)]
                         self.assertTrue(len(user_warns) > 0)
                         self.assertTrue(
-                            "Attempting non-optimization" in _exception_message(user_warns[-1]))
+                            "Attempting non-optimization" in str(user_warns[-1]))
                         assert_frame_equal(pdf, pd.DataFrame({u'map': [{u'a': 1}]}))
 
     def test_toPandas_fallback_disabled(self):
@@ -163,22 +164,19 @@ class ArrowTests(ReusedSQLTestCase):
     def test_toPandas_respect_session_timezone(self):
         df = self.spark.createDataFrame(self.data, schema=self.schema)
 
-        timezone = "America/New_York"
-        with self.sql_conf({
-                "spark.sql.execution.pandas.respectSessionTimeZone": False,
-                "spark.sql.session.timeZone": timezone}):
+        timezone = "America/Los_Angeles"
+        with self.sql_conf({"spark.sql.session.timeZone": timezone}):
             pdf_la, pdf_arrow_la = self._toPandas_arrow_toggle(df)
             assert_frame_equal(pdf_arrow_la, pdf_la)
 
-        with self.sql_conf({
-                "spark.sql.execution.pandas.respectSessionTimeZone": True,
-                "spark.sql.session.timeZone": timezone}):
+        timezone = "America/New_York"
+        with self.sql_conf({"spark.sql.session.timeZone": timezone}):
             pdf_ny, pdf_arrow_ny = self._toPandas_arrow_toggle(df)
             assert_frame_equal(pdf_arrow_ny, pdf_ny)
 
             self.assertFalse(pdf_ny.equals(pdf_la))
 
-            from pyspark.sql.types import _check_series_convert_timestamps_local_tz
+            from pyspark.sql.pandas.types import _check_series_convert_timestamps_local_tz
             pdf_la_corrected = pdf_la.copy()
             for field in self.schema:
                 if isinstance(field.dataType, TimestampType):
@@ -234,18 +232,15 @@ class ArrowTests(ReusedSQLTestCase):
     def test_createDataFrame_respect_session_timezone(self):
         from datetime import timedelta
         pdf = self.create_pandas_data_frame()
-        timezone = "America/New_York"
-        with self.sql_conf({
-                "spark.sql.execution.pandas.respectSessionTimeZone": False,
-                "spark.sql.session.timeZone": timezone}):
+        timezone = "America/Los_Angeles"
+        with self.sql_conf({"spark.sql.session.timeZone": timezone}):
             df_no_arrow_la, df_arrow_la = self._createDataFrame_toggle(pdf, schema=self.schema)
             result_la = df_no_arrow_la.collect()
             result_arrow_la = df_arrow_la.collect()
             self.assertEqual(result_la, result_arrow_la)
 
-        with self.sql_conf({
-                "spark.sql.execution.pandas.respectSessionTimeZone": True,
-                "spark.sql.session.timeZone": timezone}):
+        timezone = "America/New_York"
+        with self.sql_conf({"spark.sql.session.timeZone": timezone}):
             df_no_arrow_ny, df_arrow_ny = self._createDataFrame_toggle(pdf, schema=self.schema)
             result_ny = df_no_arrow_ny.collect()
             result_arrow_ny = df_arrow_ny.collect()
@@ -303,15 +298,15 @@ class ArrowTests(ReusedSQLTestCase):
         # Some series get converted for Spark to consume, this makes sure input is unchanged
         pdf = self.create_pandas_data_frame()
         # Use a nanosecond value to make sure it is not truncated
-        pdf.ix[0, '8_timestamp_t'] = pd.Timestamp(1)
+        pdf.iloc[0, 7] = pd.Timestamp(1)
         # Integers with nulls will get NaNs filled with 0 and will be casted
-        pdf.ix[1, '2_int_t'] = None
+        pdf.iloc[1, 1] = None
         pdf_copy = pdf.copy(deep=True)
         self.spark.createDataFrame(pdf, schema=self.schema)
         self.assertTrue(pdf.equals(pdf_copy))
 
     def test_schema_conversion_roundtrip(self):
-        from pyspark.sql.types import from_arrow_schema, to_arrow_schema
+        from pyspark.sql.pandas.types import from_arrow_schema, to_arrow_schema
         arrow_schema = to_arrow_schema(self.schema)
         schema_rt = from_arrow_schema(arrow_schema)
         self.assertEquals(self.schema, schema_rt)
@@ -361,7 +356,7 @@ class ArrowTests(ReusedSQLTestCase):
                         warn.message for warn in warns if isinstance(warn.message, UserWarning)]
                     self.assertTrue(len(user_warns) > 0)
                     self.assertTrue(
-                        "Attempting non-optimization" in _exception_message(user_warns[-1]))
+                        "Attempting non-optimization" in str(user_warns[-1]))
                     self.assertEqual(df.collect(), [Row(a={u'a': 1})])
 
     def test_createDataFrame_fallback_disabled(self):
@@ -421,6 +416,52 @@ class ArrowTests(ReusedSQLTestCase):
         for case in cases:
             run_test(*case)
 
+    def test_createDateFrame_with_category_type(self):
+        pdf = pd.DataFrame({"A": [u"a", u"b", u"c", u"a"]})
+        pdf["B"] = pdf["A"].astype('category')
+        category_first_element = dict(enumerate(pdf['B'].cat.categories))[0]
+
+        with self.sql_conf({"spark.sql.execution.arrow.pyspark.enabled": True}):
+            arrow_df = self.spark.createDataFrame(pdf)
+            arrow_type = arrow_df.dtypes[1][1]
+            result_arrow = arrow_df.toPandas()
+            arrow_first_category_element = result_arrow["B"][0]
+
+        with self.sql_conf({"spark.sql.execution.arrow.pyspark.enabled": False}):
+            df = self.spark.createDataFrame(pdf)
+            spark_type = df.dtypes[1][1]
+            result_spark = df.toPandas()
+            spark_first_category_element = result_spark["B"][0]
+
+        assert_frame_equal(result_spark, result_arrow)
+
+        # ensure original category elements are string
+        self.assertIsInstance(category_first_element, str)
+        # spark data frame and arrow execution mode enabled data frame type must match pandas
+        self.assertEqual(spark_type, 'string')
+        self.assertEqual(arrow_type, 'string')
+        self.assertIsInstance(arrow_first_category_element, str)
+        self.assertIsInstance(spark_first_category_element, str)
+
+    def test_createDataFrame_with_float_index(self):
+        # SPARK-32098: float index should not produce duplicated or truncated Spark DataFrame
+        self.assertEqual(
+            self.spark.createDataFrame(
+                pd.DataFrame({'a': [1, 2, 3]}, index=[2., 3., 4.])).distinct().count(), 3)
+
+    def test_no_partition_toPandas(self):
+        # SPARK-32301: toPandas should work from a Spark DataFrame with no partitions
+        # Forward-ported from SPARK-32300.
+        pdf = self.spark.sparkContext.emptyRDD().toDF("col1 int").toPandas()
+        self.assertEqual(len(pdf), 0)
+        self.assertEqual(list(pdf.columns), ["col1"])
+
+    def test_createDataFrame_empty_partition(self):
+        pdf = pd.DataFrame({"c1": [1], "c2": ["string"]})
+        df = self.spark.createDataFrame(pdf)
+        self.assertEqual([Row(c1=1, c2='string')], df.collect())
+        self.assertGreater(self.spark.sparkContext.defaultParallelism, len(pdf))
+
 
 @unittest.skipIf(
     not have_pandas or not have_pyarrow,
@@ -456,7 +497,7 @@ class EncryptionArrowTests(ArrowTests):
 
 
 if __name__ == "__main__":
-    from pyspark.sql.tests.test_arrow import *
+    from pyspark.sql.tests.test_arrow import *  # noqa: F401
 
     try:
         import xmlrunner

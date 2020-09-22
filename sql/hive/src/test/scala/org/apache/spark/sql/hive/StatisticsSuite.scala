@@ -911,7 +911,7 @@ class StatisticsSuite extends StatisticsCollectionTestBase with TestHiveSingleto
    */
   private def getStatsProperties(tableName: String): Map[String, String] = {
     val hTable = hiveClient.getTable(spark.sessionState.catalog.getCurrentDatabase, tableName)
-    hTable.properties.filterKeys(_.startsWith(STATISTICS_PREFIX))
+    hTable.properties.filterKeys(_.startsWith(STATISTICS_PREFIX)).toMap
   }
 
   test("change stats after insert command for hive table") {
@@ -1128,7 +1128,7 @@ class StatisticsSuite extends StatisticsCollectionTestBase with TestHiveSingleto
     def checkColStatsProps(expected: Map[String, String]): Unit = {
       sql(s"ANALYZE TABLE $tableName COMPUTE STATISTICS FOR COLUMNS " + stats.keys.mkString(", "))
       val table = hiveClient.getTable("default", tableName)
-      val props = table.properties.filterKeys(_.startsWith("spark.sql.statistics.colStats"))
+      val props = table.properties.filterKeys(_.startsWith("spark.sql.statistics.colStats")).toMap
       assert(props == expected)
     }
 
@@ -1520,10 +1520,12 @@ class StatisticsSuite extends StatisticsCollectionTestBase with TestHiveSingleto
     val ext_tbl = "SPARK_30269_external"
     withTempDir { dir =>
       withTable(tbl, ext_tbl) {
-        sql(s"CREATE TABLE $tbl (key INT, value STRING, ds STRING) PARTITIONED BY (ds)")
+        sql(s"CREATE TABLE $tbl (key INT, value STRING, ds STRING)" +
+          "USING parquet PARTITIONED BY (ds)")
         sql(
           s"""
              | CREATE TABLE $ext_tbl (key INT, value STRING, ds STRING)
+             | USING PARQUET
              | PARTITIONED BY (ds)
              | LOCATION '${dir.toURI}'
            """.stripMargin)

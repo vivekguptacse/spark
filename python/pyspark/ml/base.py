@@ -15,14 +15,15 @@
 # limitations under the License.
 #
 
-from abc import ABCMeta, abstractmethod
+from abc import ABCMeta, abstractmethod, abstractproperty
 
 import copy
 import threading
 
 from pyspark import since
-from pyspark.ml.param.shared import *
 from pyspark.ml.common import inherit_doc
+from pyspark.ml.param.shared import HasInputCol, HasOutputCol, HasLabelCol, HasFeaturesCol, \
+    HasPredictionCol, Params
 from pyspark.sql.functions import udf
 from pyspark.sql.types import StructField, StructType
 
@@ -67,14 +68,13 @@ class _FitMultipleIterator(object):
 
 
 @inherit_doc
-class Estimator(Params):
+class Estimator(Params, metaclass=ABCMeta):
     """
     Abstract class for estimators that fit models to data.
 
     .. versionadded:: 1.3.0
     """
-
-    __metaclass__ = ABCMeta
+    pass
 
     @abstractmethod
     def _fit(self, dataset):
@@ -96,8 +96,6 @@ class Estimator(Params):
         :return: A thread safe iterable which contains one model for each param map. Each
                  call to `next(modelIterator)` will return `(index, model)` where model was fit
                  using `paramMaps[index]`. `index` values may not be sequential.
-
-        .. note:: DeveloperApi
         """
         estimator = self.copy()
 
@@ -135,14 +133,13 @@ class Estimator(Params):
 
 
 @inherit_doc
-class Transformer(Params):
+class Transformer(Params, metaclass=ABCMeta):
     """
     Abstract class for transformers that transform one dataset into another.
 
     .. versionadded:: 1.3.0
     """
-
-    __metaclass__ = ABCMeta
+    pass
 
     @abstractmethod
     def _transform(self, dataset):
@@ -175,14 +172,13 @@ class Transformer(Params):
 
 
 @inherit_doc
-class Model(Transformer):
+class Model(Transformer, metaclass=ABCMeta):
     """
     Abstract class for models that are fitted by estimators.
 
     .. versionadded:: 1.4.0
     """
-
-    __metaclass__ = ABCMeta
+    pass
 
 
 @inherit_doc
@@ -246,3 +242,78 @@ class UnaryTransformer(HasInputCol, HasOutputCol, Transformer):
         transformedDataset = dataset.withColumn(self.getOutputCol(),
                                                 transformUDF(dataset[self.getInputCol()]))
         return transformedDataset
+
+
+@inherit_doc
+class _PredictorParams(HasLabelCol, HasFeaturesCol, HasPredictionCol):
+    """
+    Params for :py:class:`Predictor` and :py:class:`PredictorModel`.
+
+    .. versionadded:: 3.0.0
+    """
+    pass
+
+
+@inherit_doc
+class Predictor(Estimator, _PredictorParams, metaclass=ABCMeta):
+    """
+    Estimator for prediction tasks (regression and classification).
+    """
+
+    @since("3.0.0")
+    def setLabelCol(self, value):
+        """
+        Sets the value of :py:attr:`labelCol`.
+        """
+        return self._set(labelCol=value)
+
+    @since("3.0.0")
+    def setFeaturesCol(self, value):
+        """
+        Sets the value of :py:attr:`featuresCol`.
+        """
+        return self._set(featuresCol=value)
+
+    @since("3.0.0")
+    def setPredictionCol(self, value):
+        """
+        Sets the value of :py:attr:`predictionCol`.
+        """
+        return self._set(predictionCol=value)
+
+
+@inherit_doc
+class PredictionModel(Model, _PredictorParams, metaclass=ABCMeta):
+    """
+    Model for prediction tasks (regression and classification).
+    """
+
+    @since("3.0.0")
+    def setFeaturesCol(self, value):
+        """
+        Sets the value of :py:attr:`featuresCol`.
+        """
+        return self._set(featuresCol=value)
+
+    @since("3.0.0")
+    def setPredictionCol(self, value):
+        """
+        Sets the value of :py:attr:`predictionCol`.
+        """
+        return self._set(predictionCol=value)
+
+    @abstractproperty
+    @since("2.1.0")
+    def numFeatures(self):
+        """
+        Returns the number of features the model was trained on. If unknown, returns -1
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
+    @since("3.0.0")
+    def predict(self, value):
+        """
+        Predict label for the given features.
+        """
+        raise NotImplementedError()

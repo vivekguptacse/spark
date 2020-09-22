@@ -25,13 +25,18 @@ import scala.collection.mutable
 import org.scalatest.BeforeAndAfter
 
 import org.apache.spark.sql.{AnalysisException, DataFrame, QueryTest, Row, SaveMode, SparkSession, SQLContext}
-import org.apache.spark.sql.connector.catalog.{SupportsWrite, Table, TableCapability, TableProvider}
+import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
+import org.apache.spark.sql.catalyst.rules.Rule
+import org.apache.spark.sql.catalyst.trees.TreeNodeTag
+import org.apache.spark.sql.connector.catalog.{SupportsWrite, Table, TableCapability}
 import org.apache.spark.sql.connector.expressions.{FieldReference, IdentityTransform, Transform}
-import org.apache.spark.sql.connector.write.{SupportsOverwrite, SupportsTruncate, V1WriteBuilder, WriteBuilder}
-import org.apache.spark.sql.execution.datasources.{DataSource, DataSourceUtils}
+import org.apache.spark.sql.connector.write.{LogicalWriteInfo, LogicalWriteInfoImpl, SupportsOverwrite, SupportsTruncate, V1WriteBuilder, WriteBuilder}
+import org.apache.spark.sql.execution.datasources.DataSourceUtils
+import org.apache.spark.sql.internal.SQLConf.V2_SESSION_CATALOG_IMPLEMENTATION
+import org.apache.spark.sql.internal.connector.SimpleTableProvider
 import org.apache.spark.sql.sources._
 import org.apache.spark.sql.test.SharedSparkSession
-import org.apache.spark.sql.types.{IntegerType, StringType, StructType}
+import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
 
 class V1WriteFallbackSuite extends QueryTest with SharedSparkSession with BeforeAndAfter {
@@ -123,6 +128,23 @@ class V1WriteFallbackSuite extends QueryTest with SharedSparkSession with Before
     }
     assert(e3.getMessage.contains("schema"))
   }
+
+  test("fallback writes should only analyze plan once") {
+    SparkSession.clearActiveSession()
+    SparkSession.clearDefaultSession()
+    try {
+      val session = SparkSession.builder()
+        .master("local[1]")
+        .withExtensions(_.injectPostHocResolutionRule(_ => OnlyOnceRule))
+        .config(V2_SESSION_CATALOG_IMPLEMENTATION.key, classOf[V1FallbackTableCatalog].getName)
+        .getOrCreate()
+      val df = session.createDataFrame(Seq((1, "x"), (2, "y"), (3, "z")))
+      df.write.mode("append").option("name", "t1").format(v2Format).saveAsTable("test")
+    } finally {
+      SparkSession.setActiveSession(spark)
+      SparkSession.setDefaultSession(spark)
+    }
+  }
 }
 
 class V1WriteFallbackSessionCatalogSuite
@@ -173,7 +195,7 @@ private object InMemoryV1Provider {
 }
 
 class InMemoryV1Provider
-  extends TableProvider
+  extends SimpleTableProvider
   with DataSourceRegister
   with CreatableRelationProvider {
   override def getTable(options: CaseInsensitiveStringMap): Table = {
@@ -233,7 +255,9 @@ class InMemoryV1Provider
       // do nothing
       return getRelation
     }
-    val writer = table.newWriteBuilder(new CaseInsensitiveStringMap(parameters.asJava))
+    val writer = table.newWriteBuilder(
+      LogicalWriteInfoImpl(
+        "", StructType(Seq.empty), new CaseInsensitiveStringMap(parameters.asJava)))
     if (mode == SaveMode.Overwrite) {
       writer.asInstanceOf[SupportsTruncate].truncate()
     }
@@ -267,8 +291,8 @@ class InMemoryTableWithV1Fallback(
 
   def getData: Seq[Row] = dataMap.values.flatten.toSeq
 
-  override def newWriteBuilder(options: CaseInsensitiveStringMap): WriteBuilder = {
-    new FallbackWriteBuilder(options)
+  override def newWriteBuilder(info: LogicalWriteInfo): WriteBuilder = {
+    new FallbackWriteBuilder(info.options)
   }
 
   private class FallbackWriteBuilder(options: CaseInsensitiveStringMap)
@@ -313,5 +337,26 @@ class InMemoryTableWithV1Fallback(
         }
       }
     }
+  }
+}
+
+/** A rule that fails if a query plan is analyzed twice. */
+object OnlyOnceRule extends Rule[LogicalPlan] {
+  private val tag = TreeNodeTag[String]("test")
+  private val counts = new mutable.HashMap[LogicalPlan, Int]()
+
+  override def apply(plan: LogicalPlan): LogicalPlan = {
+    if (plan.getTagValue(tag).isEmpty) {
+      plan.setTagValue(tag, "abc")
+      plan
+    } else {
+      val cnt = counts.getOrElseUpdate(plan, 0) + 1
+      // This rule will be run as injectPostHocResolutionRule, and is supposed to be run only twice.
+      // Once during planning and once during checkBatchIdempotence
+      assert(cnt <= 1, "This rule shouldn't have been called again")
+      counts.put(plan, cnt)
+      plan
+    }
+
   }
 }

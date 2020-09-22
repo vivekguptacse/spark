@@ -213,7 +213,7 @@ class SingleEventLogFileWriterSuite extends EventLogFileWritersSuite {
       compressionCodecShortName)
 
     val finalLogPath = new Path(logPath)
-    assert(fileSystem.exists(finalLogPath) && fileSystem.isFile(finalLogPath))
+    assert(fileSystem.exists(finalLogPath) && fileSystem.getFileStatus(finalLogPath).isFile)
     assert(expectedLines === readLinesFromEventLogFile(finalLogPath, fileSystem))
   }
 }
@@ -291,7 +291,7 @@ class RollingEventLogFilesWriterSuite extends EventLogFileWritersSuite {
           expectedMaxSizeBytes: Long): Unit = {
         assert(eventLogFiles.forall(f => f.getLen <= expectedMaxSizeBytes))
         assert((1 to expectedLastIndex) ===
-          eventLogFiles.map(f => getIndex(f.getPath.getName)))
+          eventLogFiles.map(f => getEventLogFileIndex(f.getPath.getName)))
       }
 
       val appId = getUniqueApplicationId
@@ -357,10 +357,10 @@ class RollingEventLogFilesWriterSuite extends EventLogFileWritersSuite {
       expectedLines: Seq[String]): Unit = {
     val logDirPath = getAppEventLogDirPath(logBaseDir, appId, appAttemptId)
 
-    assert(fileSystem.exists(logDirPath) && fileSystem.isDirectory(logDirPath))
+    assert(fileSystem.exists(logDirPath) && fileSystem.getFileStatus(logDirPath).isDirectory)
 
     val appStatusFile = getAppStatusFilePath(logDirPath, appId, appAttemptId, inProgress = false)
-    assert(fileSystem.exists(appStatusFile) && fileSystem.isFile(appStatusFile))
+    assert(fileSystem.exists(appStatusFile) && fileSystem.getFileStatus(appStatusFile).isFile)
 
     val eventLogFiles = listEventLogFiles(logDirPath)
     val allLines = mutable.ArrayBuffer[String]()
@@ -373,6 +373,6 @@ class RollingEventLogFilesWriterSuite extends EventLogFileWritersSuite {
 
   private def listEventLogFiles(logDirPath: Path): Seq[FileStatus] = {
     fileSystem.listStatus(logDirPath).filter(isEventLogFile)
-      .sortBy { fs => getIndex(fs.getPath.getName) }
+      .sortBy { fs => getEventLogFileIndex(fs.getPath.getName) }
   }
 }

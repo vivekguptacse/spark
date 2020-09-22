@@ -35,12 +35,6 @@ import org.apache.spark.sql.internal.SQLConf
  * the input partition ordering requirements are met.
  */
 case class EnsureRequirements(conf: SQLConf) extends Rule[SparkPlan] {
-  private def defaultNumPreShufflePartitions: Int =
-    if (conf.adaptiveExecutionEnabled && conf.reducePostShufflePartitionsEnabled) {
-      conf.maxNumPostShufflePartitions
-    } else {
-      conf.numShufflePartitions
-    }
 
   private def ensureDistributionAndOrdering(operator: SparkPlan): SparkPlan = {
     val requiredChildDistributions: Seq[Distribution] = operator.requiredChildDistribution
@@ -55,11 +49,9 @@ case class EnsureRequirements(conf: SQLConf) extends Rule[SparkPlan] {
         child
       case (child, BroadcastDistribution(mode)) =>
         BroadcastExchangeExec(mode, child)
-      case (ShuffleExchangeExec(partitioning, child, _), distribution: OrderedDistribution) =>
-        ShuffleExchangeExec(distribution.createPartitioning(partitioning.numPartitions), child)
       case (child, distribution) =>
         val numPartitions = distribution.requiredNumPartitions
-          .getOrElse(defaultNumPreShufflePartitions)
+          .getOrElse(conf.numShufflePartitions)
         ShuffleExchangeExec(distribution.createPartitioning(numPartitions), child)
     }
 
@@ -93,11 +85,16 @@ case class EnsureRequirements(conf: SQLConf) extends Rule[SparkPlan] {
         childrenIndexes.map(children).filterNot(_.isInstanceOf[ShuffleExchangeExec])
           .map(_.outputPartitioning.numPartitions)
       val expectedChildrenNumPartitions = if (nonShuffleChildrenNumPartitions.nonEmpty) {
-        // Here we pick the max number of partitions among these non-shuffle children as the
-        // expected number of shuffle partitions. However, if it's smaller than
-        // `conf.numShufflePartitions`, we pick `conf.numShufflePartitions` as the
-        // expected number of shuffle partitions.
-        math.max(nonShuffleChildrenNumPartitions.max, conf.numShufflePartitions)
+        if (nonShuffleChildrenNumPartitions.length == childrenIndexes.length) {
+          // Here we pick the max number of partitions among these non-shuffle children.
+          nonShuffleChildrenNumPartitions.max
+        } else {
+          // Here we pick the max number of partitions among these non-shuffle children as the
+          // expected number of shuffle partitions. However, if it's smaller than
+          // `conf.numShufflePartitions`, we pick `conf.numShufflePartitions` as the
+          // expected number of shuffle partitions.
+          math.max(nonShuffleChildrenNumPartitions.max, conf.defaultNumShufflePartitions)
+        }
       } else {
         childrenNumPartitions.max
       }
@@ -170,7 +167,7 @@ case class EnsureRequirements(conf: SQLConf) extends Rule[SparkPlan] {
           return (leftKeys, rightKeys)
       }
     }
-    (leftKeysBuffer, rightKeysBuffer)
+    (leftKeysBuffer.toSeq, rightKeysBuffer.toSeq)
   }
 
   private def reorderJoinKeys(
@@ -207,10 +204,11 @@ case class EnsureRequirements(conf: SQLConf) extends Rule[SparkPlan] {
         ShuffledHashJoinExec(reorderedLeftKeys, reorderedRightKeys, joinType, buildSide, condition,
           left, right)
 
-      case SortMergeJoinExec(leftKeys, rightKeys, joinType, condition, left, right) =>
+      case SortMergeJoinExec(leftKeys, rightKeys, joinType, condition, left, right, isPartial) =>
         val (reorderedLeftKeys, reorderedRightKeys) =
           reorderJoinKeys(leftKeys, rightKeys, left.outputPartitioning, right.outputPartitioning)
-        SortMergeJoinExec(reorderedLeftKeys, reorderedRightKeys, joinType, condition, left, right)
+        SortMergeJoinExec(reorderedLeftKeys, reorderedRightKeys, joinType, condition,
+          left, right, isPartial)
 
       case other => other
     }
